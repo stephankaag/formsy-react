@@ -1,39 +1,11 @@
 import PropTypes from 'prop-types';
 import React from 'react';
-import utils from './utils';
+import ReactDOM from 'react-dom';
+import {isSame} from './utils';
 
 /* eslint-disable react/default-props-match-prop-types */
 
-const convertValidationsToObject = (validations) => {
-  if (typeof validations === 'string') {
-    return validations.split(/,(?![^{[]*[}\]])/g).reduce((validationsAccumulator, validation) => {
-      let args = validation.split(':');
-      const validateMethod = args.shift();
-
-      args = args.map((arg) => {
-        try {
-          return JSON.parse(arg);
-        } catch (e) {
-          return arg; // It is a string if it can not parse it
-        }
-      });
-
-      if (args.length > 1) {
-        throw new Error('Formsy does not support multiple args on string validations. Use object format of validations instead.');
-      }
-
-      // Avoid parameter reassignment
-      const validationsAccumulatorCopy = Object.assign({}, validationsAccumulator);
-      validationsAccumulatorCopy[validateMethod] = args.length ? args[0] : true;
-      return validationsAccumulatorCopy;
-    }, {});
-  }
-
-  return validations || {};
-};
-
 const propTypes = {
-  innerRef: PropTypes.func,
   name: PropTypes.string.isRequired,
   required: PropTypes.oneOfType([
     PropTypes.bool,
@@ -45,178 +17,153 @@ const propTypes = {
     PropTypes.string,
   ]),
   value: PropTypes.any, // eslint-disable-line react/forbid-prop-types
+  formsy: PropTypes.object.isRequired, // eslint-disable-line react/forbid-prop-types
 };
 
 export {
   propTypes,
 };
 
-export default (Component) => {
+export default Component => {
   class WrappedComponent extends React.Component {
-    constructor(props) {
-      super(props);
-      this.state = {
-        value: props.value,
-        isRequired: false,
-        isValid: true,
-        isPristine: true,
-        pristineValue: props.value,
-        validationError: [],
-        externalError: null,
-        formSubmitted: false,
-      };
+    componentWillMount() {
+      if (!this.props.name) {
+        throw new Error('Form field requires a name property when used');
+      }
     }
 
-    componentWillMount() {
-      const configure = () => {
+    componentDidMount() {
+      ReactDOM.unstable_batchedUpdates(() => {
+        this.props.formsy.addStateToForm(this.props.name, {
+          currentValue: this.props.value,               //current value
+          isRequired: this.props.isRequired,                  //whether input is required
+          isValid: true,                                      //whether the current value passed all validations
+          pristineValue: this.props.value,                    //pristine value
+          validationError: this.props.validationError,        //default validation error message if one is not defined in validationErrors
+          validationErrors: this.props.validationErrors,      //validationErrors, maps validations to error messages
+          validationErrorsMessages: [],                       //error messages for currently failing validations
+          externalError: null,                                //whether there is an external validation error passed in as a prop
+          formSubmitted: false,                               //whether the current value has been submitted with the rest of the form
+          parsedValidations: null,                            //validations converted to objects used in runtime
+          parsedRequiredValidations: null,                    //required validations converted to objects used in runtime
+        });
+
         this.setValidations(this.props.validations, this.props.required);
-
-        // Pass a function instead?
-        this.context.formsy.attachToForm(this);
-      };
-
-      if (!this.props.name) {
-        throw new Error('Form Input requires a name property when used');
-      }
-
-      configure();
+      });
     }
 
     // We have to make sure the validate method is kept when new props are added
-    componentWillReceiveProps(nextProps) {
-      this.setValidations(nextProps.validations, nextProps.required);
+    /*componentWillUpdate(nextvalProps) {
+      if (!isSame(nextProps.validations, this.props.validations) ,
+        !isSame(nextProps.required, this.props.required)) {
+        this.setValidations(nextProps.validations, nextProps.required);
+      }
+    }*/
+
+    shouldComponentUpdate(nextProps) {
+      return !isSame(nextProps.validations, this.props.validations) ||
+        !isSame(nextProps.required, this.props.required) ||
+        nextProps.name != this.props.name ||
+        nextProps.isValid != this.props.isValid ||
+        nextProps.isRequired != this.props.isRequired ||
+        nextProps.externalError != this.props.externalError ||
+        !isSame(nextProps.validationError, this.props.validationError) ||
+        !isSame(nextProps.value, this.props.value) ||
+        !isSame(nextProps.currentValue, this.props.currentValue) ||
+        nextProps.isFormDisabled != this.props.isFormDisabled ||
+        nextProps.isFormSubmitted != this.props.isFormSubmitted;
     }
 
     componentDidUpdate(prevProps) {
-      // If the value passed has changed, set it. If value is not passed it will
-      // internally update, and this will never run
-      if (!utils.isSame(this.props.value, prevProps.value)) {
-        this.setValue(this.props.value);
-      }
+      ReactDOM.unstable_batchedUpdates(() => {
+        // If validations or required is changed, run a new validation
+        if (!isSame(this.props.validations, prevProps.validations) ,
+          !isSame(this.props.required, prevProps.required)) {
 
-      // If validations or required is changed, run a new validation
-      if (!utils.isSame(this.props.validations, prevProps.validations) ||
-        !utils.isSame(this.props.required, prevProps.required)) {
-        this.context.formsy.validate(this);
-      }
+          this.setValidations(this.props.validations, this.props.required);
+        }
+
+        // allow value prop change to update the state
+        //if (typeof this.props.value != 'undefined' && typeof prevProps.value == 'undefined') {
+        if (!isSame(this.props.value, prevProps.value)) {
+          this.setValue(this.props.value);
+        }
+      });
     }
 
     // Detach it when component unmounts
     componentWillUnmount() {
-      this.context.formsy.detachFromForm(this);
+      this.props.formsy.removeStateFromForm(this.props.name);
     }
 
     getErrorMessage = () => {
       const messages = this.getErrorMessages();
+
       return messages.length ? messages[0] : null;
     }
 
     getErrorMessages = () => {
-      if (!this.isValid() || this.showRequired()) {
-        return this.state.externalError || this.state.validationError || [];
+      if (!this.props.isValid || this.props.isRequired) {
+        return this.props.externalError || this.props.validationErrorMessages || [];
       }
+
       return [];
     }
 
-    getValue = () => this.state.value;
-
     setValidations = (validations, required) => {
-      // Add validations to the store itself as the props object can not be modified
-      this.validations = convertValidationsToObject(validations) || {};
-      this.requiredValidations = required === true ? { isDefaultRequiredValue: true } :
-        convertValidationsToObject(required);
-    }
+      this.props.formsy.setValidations(this.props.name, validations, required);
+    };
 
     // By default, we validate after the value has been set.
     // A user can override this and pass a second parameter of `false` to skip validation.
     setValue = (value, validate = true) => {
-      if (!validate) {
-        this.setState({
-          value,
-        });
-      } else {
-        this.setState({
-          value,
-          isPristine: false,
-        }, () => {
-          this.context.formsy.validate(this);
-        });
-      }
+      this.props.formsy.setValue(this.props.name, value, validate);
     }
-
-    hasValue = () => this.state.value !== '';
-
-    isFormDisabled = () => this.context.formsy.isFormDisabled();
-
-    isFormSubmitted = () => this.state.formSubmitted;
-
-    isPristine = () => this.state.isPristine;
-
-    isRequired = () => !!this.props.required;
-
-    isValid = () => this.state.isValid;
 
     isValidValue = value =>
-      this.context.formsy.isValidValue.call(null, this, value);
+      this.props.formsy.isValidValue(this.props.name, value);
 
     resetValue = () => {
-      this.setState({
-        value: this.state.pristineValue,
-        isPristine: true,
-      }, () => {
-        this.context.formsy.validate(this);
-      });
+      this.props.formsy.resetValue(this.props.name);
     }
 
-    showError = () => !this.showRequired() && !this.isValid();
-
-    showRequired = () => this.state.isRequired;
+    showError = () => !this.props.isRequired && !this.props.isValid;
 
     render() {
-      const { innerRef } = this.props;
       const propsForElement = {
         ...this.props,
         errorMessage: this.getErrorMessage(),
         errorMessages: this.getErrorMessages(),
-        hasValue: this.hasValue(),
-        isFormDisabled: this.isFormDisabled(),
-        isFormSubmitted: this.isFormSubmitted(),
-        isPristine: this.isPristine(),
-        isRequired: this.isRequired(),
-        isValid: this.isValid(),
+        hasValue: !!this.props.currentValue,
+        isFormDisabled: this.props.isFormDisabled,
+        isFormSubmitted: this.props.formSubmitted,
+        isRequired: !!this.props.required,
+        isPristine: this.props.currentValue === this.props.pristineValue,
+        isValid: this.props.isValid,
         isValidValue: this.isValidValue,
         resetValue: this.resetValue,
         setValidations: this.setValidations,
         setValue: this.setValue,
         showError: this.showError(),
-        showRequired: this.showRequired(),
-        value: this.getValue(),
+        showRequired: this.props.isRequired,
+        value: this.props.currentValue || this.props.value,
       };
 
-      if (innerRef) {
-        propsForElement.ref = innerRef;
-      }
-
-      return React.createElement(Component, propsForElement);
+      return <Component {...propsForElement} />;
     }
   }
 
   function getDisplayName(component) {
     return (
-      component.displayName ||
-      component.name ||
+      component.displayName ,
+      component.name ,
       (typeof component === 'string' ? component : 'Component')
     );
   }
 
   WrappedComponent.displayName = `Formsy(${getDisplayName(Component)})`;
 
-  WrappedComponent.contextTypes = {
-    formsy: PropTypes.object, // What about required?
-  };
-
   WrappedComponent.defaultProps = {
-    innerRef: null,
     required: false,
     validationError: '',
     validationErrors: {},
